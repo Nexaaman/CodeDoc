@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "CodeDoc"
+version = "1.0.0"
+description = "Local AI Code Assistant CLI"
+authors = [{name = "Aman", email = "amanp5450@gmail.com"}]
+requires-python = ">=3.10"
+dependencies = [
+    "typer[all]>=0.9.0",
+    "rich>=13.0.0",
+    "huggingface_hub[hf_xet]",
+    "llama-cpp-python[server]>=0.2.23",
+    "smolagents[toolkit]",
+    "requests>=2.31.0",
+    "psutil>=5.9.0",
+    "smolagents[openai]",
+]
+
+[project.scripts]
+codedoc = "codedoc.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

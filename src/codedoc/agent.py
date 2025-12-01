@@ -3,7 +3,7 @@ from smolagents import CodeAgent, OpenAIServerModel, Tool
 from rich.console import Console
 from rich.markdown import Markdown
 from codedoc.analysis import StaticAnalyzer, Issue
-
+import re
 console = Console()
 
 class LocalCodeAgent:
@@ -23,6 +23,23 @@ class LocalCodeAgent:
             verbosity_level=0
         )
         self.analyzer = StaticAnalyzer()
+        
+        
+    def _extract_code(self, llm_response: str) -> str:
+        """Helper to extract clean code from Markdown response."""
+        # Match code blocks with python syntax highlighting
+        pattern = r'```python\s*\n(.*?)```'
+        match = re.search(pattern, str(llm_response), re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+        # Fallback: try generic code block
+        pattern = r'```\s*\n(.*?)```'
+        match = re.search(pattern, str(llm_response), re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+        return str(llm_response).strip()
         
         
     def get_truncated_messages(self, max_history=2):
@@ -86,3 +103,48 @@ class LocalCodeAgent:
             "static_issues": static_issues,
             "llm_response": str(response)
         }
+        
+    def fix_file(self, file_path: str) -> str:
+        """
+        Reads file, runs analysis, and asks LLM to regenerate the code with fixes.
+        Returns the raw string of the fixed code.
+        """
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                code_content = f.read()
+        except FileNotFoundError:
+            return ""
+
+        # Run static analysis first to give the LLM context on what to fix
+        static_issues = self.analyzer.scan(code_content, file_path)
+        issues_text = ""
+        for i in static_issues:
+            issues_text += f"- Line {i.line}: {i.message}\n"
+
+        prompt = f"""
+        You are a Code Repair Specialist.
+        
+        File: {file_path}
+        
+        Static Analysis Issues detected:
+        {issues_text}
+        
+        Input Code:
+        ```python
+        {code_content}
+        ```
+        
+        Task:
+        1. Fix all static analysis issues listed above.
+        2. Fix any obvious logic bugs or security flaws.
+        3. Maintain the original style and imports unless necessary to change.
+        4. Output the COMPLETE fixed file content. Do not truncate the code.
+        
+        IMPORTANT: Return ONLY the code inside a markdown code block (e.g., ```python ... ```).
+        Do not add conversational text after the code block.
+        """
+
+        console.print("[italic dim]Waiting for LLM to generate patch...[/italic dim]")
+        response = self.agent.run(prompt, reset=True)
+        
+        return self._extract_code(response)

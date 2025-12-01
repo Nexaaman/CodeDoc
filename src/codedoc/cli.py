@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.table import Table
+from rich.syntax import Syntax
 import time
 from huggingface_hub import hf_hub_download
 
@@ -15,6 +16,7 @@ from codedoc.config import (
 from codedoc.server import start_server, stop_server, is_server_running
 from codedoc.agent import LocalCodeAgent
 from codedoc.analysis import Issue
+from codedoc.patch import create_diff, apply_fix
 
 app = typer.Typer(
     help="CodeDoc: Your Local AI Coding Assistant",
@@ -139,7 +141,7 @@ def analyze(file: Path):
         duration = time.time() - start_time
 
     if isinstance(result, str) and result.startswith("Error"):
-        console.print(f"[bold red]Error:[/bold red] {result['error']}")
+        console.print(f"[bold red]{result}[/bold red]")
         raise typer.Exit(1)
 
     # 1. Show Static Issues Table
@@ -155,6 +157,66 @@ def analyze(file: Path):
         border_style="magenta",
         padding=(1, 2)
     ))
+    
+    
+@app.command("fix")
+def fix(
+    file: Path = typer.Argument(..., help="File to fix"),
+    interactive: bool = typer.Option(True, "--interactive/--auto", help="Ask confirmation before applying patch")
+):
+    """Analyze, fix, and patch a file automatically."""
+    if not file.exists():
+        console.print(f"[red]File {file} does not exist.[/red]")
+        raise typer.Exit(1)
+        
+    if not is_server_running():
+        console.print("[red]Server is not running. Execute 'codedoc serve' first.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold blue]🔧 Attempting to fix {file.name}...[/bold blue]")
+    agent = LocalCodeAgent()
+
+    # 1. Get Fixes
+    with console.status("[bold cyan]Agent is fixing code...[/bold cyan]", spinner="dots8Bit"):
+        original_content = file.read_text(encoding="utf-8")
+        fixed_content = agent.fix_file(str(file))
+
+    if not fixed_content or fixed_content == original_content:
+        console.print("[yellow]No changes suggested by the agent.[/yellow]")
+        return
+
+    # 2. Generate Diff
+    diff = create_diff(original_content, fixed_content, file.name)
+    
+    if not diff:
+        console.print("[yellow]No differences found between original and fixed code.[/yellow]")
+        return
+    
+    # 3. Show Diff
+    console.print(Panel(
+        Syntax(diff, "diff", theme="monokai", word_wrap=True),
+        title=f"Proposed Patch for {file.name}",
+        border_style="yellow"
+    ))
+    
+    
+    # Show explanation
+    console.print("\n[bold cyan]📝 What changed:[/bold cyan]")
+    console.print("The patch above shows suggested improvements based on static analysis and best practices.")
+    console.print("")
+
+    # 4. Apply Logic
+    if interactive:
+        confirm = typer.confirm("Do you want to apply this patch?")
+        if not confirm:
+            console.print("[yellow]Patch discarded.[/yellow]")
+            raise typer.Abort()
+    
+    if apply_fix(file, fixed_content):
+        console.print(f"[bold green]✔ Successfully patched {file.name}[/bold green]")
+    else:
+        console.print(f"[bold red]❌ Failed to write to {file.name}[/bold red]")
+        raise typer.Exit(1)
 
 if __name__ == "__main__":
     app()

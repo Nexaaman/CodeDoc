@@ -4,6 +4,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
+from rich.table import Table
+import time
 from huggingface_hub import hf_hub_download
 
 from codedoc.config import (
@@ -12,6 +14,7 @@ from codedoc.config import (
 )
 from codedoc.server import start_server, stop_server, is_server_running
 from codedoc.agent import LocalCodeAgent
+from codedoc.analysis import Issue
 
 app = typer.Typer(
     help="CodeDoc: Your Local AI Coding Assistant",
@@ -93,7 +96,27 @@ def kill():
     """Stop the background server."""
     stop_server()
 
-# --- Analysis Commands (Phase 1 Goal) ---
+# --- Analysis Commands ---
+
+def create_issue_table(issues: list[Issue]) -> Table:
+    table = Table(title="Static Code Analysis", border_style="blue", show_lines=True)
+    table.add_column("Line", style="cyan", justify="right", width=6)
+    table.add_column("Sev", justify="center", width=8)
+    table.add_column("Issue", style="white")
+
+    severity_colors = {"HIGH": "bold red", "MEDIUM": "yellow", "LOW": "green"}
+
+    if not issues:
+        table.add_row("-", "OK", "[green]No static issues found.[/green]")
+    else:
+        for issue in issues:
+            sev_style = severity_colors.get(issue.severity, "white")
+            table.add_row(
+                str(issue.line), 
+                f"[{sev_style}]{issue.severity}[/{sev_style}]", 
+                issue.message
+            )
+    return table
 
 @app.command("analyze")
 def analyze(file: Path):
@@ -110,10 +133,28 @@ def analyze(file: Path):
     
     agent = LocalCodeAgent()
     
-    with console.status("[bold green]Agent is thinking (this may take a moment)...[/bold green]", spinner="dots"):
+    with console.status("[bold cyan]Scanning code structure & Reasoning...[/bold cyan]", spinner="dots8Bit"):
+        start_time = time.time()
         result = agent.analyze_file(str(file))
-    
-    console.print(Panel(Markdown(str(result)), title=f"Analysis: {file.name}", border_style="green"))
+        duration = time.time() - start_time
+
+    if isinstance(result, str) and result.startswith("Error"):
+        console.print(f"[bold red]Error:[/bold red] {result['error']}")
+        raise typer.Exit(1)
+
+    # 1. Show Static Issues Table
+    static_issues = result.get("static_issues", [])
+    table = create_issue_table(static_issues)
+    console.print(table)
+    console.print("")
+
+    # 2. Show LLM Analysis
+    console.print(Panel(
+        Markdown(result.get("llm_response", "")), 
+        title=f"🧠 AI Insights ({duration:.1f}s)", 
+        border_style="magenta",
+        padding=(1, 2)
+    ))
 
 if __name__ == "__main__":
     app()

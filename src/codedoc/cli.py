@@ -19,6 +19,13 @@ from codedoc.agent import LocalCodeAgent
 from codedoc.analysis import Issue
 from codedoc.patch import create_diff, apply_fix
 
+
+from rich.layout import Layout
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.columns import Columns
+from codedoc.analysis import StaticAnalyzer
+from codedoc.quality import ExternalLinter
+
 app = typer.Typer(
     help="CodeDoc: Your Local AI Coding Assistant",
     add_completion=False
@@ -287,6 +294,104 @@ def chat():
             break
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
+            
+            
+@app.command("score")
+def score(
+    file: Path = typer.Argument(..., help="Python file to score"),
+):
+    """
+    Calculate a comprehensive Code Quality Score (0-100) and run linters.
+    """
+    if not file.exists():
+        console.print(f"[red]File {file} does not exist.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold blue]📊 Analyzing Health of {file.name}...[/bold blue]")
+
+    # 1. Run Internal Analysis
+    analyzer = StaticAnalyzer()
+    try:
+        content = file.read_text(encoding="utf-8")
+        results = analyzer.scan(content, str(file))
+        internal_score = results["score"]
+        metrics = results["metrics"]
+        issues = results["issues"]
+    except Exception as e:
+        console.print(f"[red]Analysis failed: {e}[/red]")
+        raise typer.Exit(1)
+
+    # 2. Run External Linters (Parallel-ish via helper)
+    with console.status("[bold magenta]Running external tools (Ruff/Black)...[/bold magenta]"):
+        ruff_res = ExternalLinter.run_ruff(str(file))
+        black_res = ExternalLinter.run_black_check(str(file))
+
+    # --- VISUALIZATION DASHBOARD ---
+
+    # 1. Score Panel
+    score_color = "green" if internal_score >= 80 else "yellow" if internal_score >= 50 else "red"
+    score_panel = Panel(
+        f"[bold {score_color} try='center' size=50]{internal_score}/100[/bold {score_color}]\n\n"
+        f"Issues Found: {len(issues)}\n"
+        f"Functions: {len(metrics)}",
+        title="Code Quality Score",
+        border_style=score_color
+    )
+
+    # 2. Complexity Table
+    c_table = Table(title="Cyclomatic Complexity", border_style="cyan", show_edge=False)
+    c_table.add_column("Function", style="white")
+    c_table.add_column("Complex", justify="right")
+    c_table.add_column("Lines", justify="right")
+    c_table.add_column("Args", justify="right")
+    
+    for m in metrics:
+        c_color = "red" if m.complexity > 10 else "green"
+        c_table.add_row(m.name, f"[{c_color}]{m.complexity}[/{c_color}]", str(m.length), str(m.args_count))
+        
+    if not metrics:
+        c_table.add_row("No functions found", "-", "-", "-")
+
+    # 3. Issues Panel
+    if issues:
+        issue_text = "\n".join([f"[{i.severity}] L{i.line}: {i.message}" for i in issues])
+    else:
+        issue_text = "[green]No static issues detected![/green]"
+    
+    issues_panel = Panel(issue_text, title="Static Analysis Issues", border_style="yellow")
+
+    # 4. External Tools Panel
+    ext_text = ""
+    
+    # Ruff
+    if ruff_res["status"] == "missing":
+        ext_text += "[dim]• Ruff not installed (pip install ruff)[/dim]\n"
+    elif ruff_res["status"] == "ok":
+        ext_text += "[green]• Ruff: Pass[/green]\n"
+    else:
+        ext_text += "[red]• Ruff: Failed[/red]\n"
+        
+    # Black
+    if black_res["status"] == "missing":
+        ext_text += "[dim]• Black not installed (pip install black)[/dim]\n"
+    elif black_res["status"] == "ok":
+        ext_text += "[green]• Black: Formatted[/green]\n"
+    else:
+        ext_text += "[yellow]• Black: Formatting needed[/yellow]\n"
+        
+    ext_panel = Panel(ext_text, title="External Tools", border_style="blue")
+
+    # RENDER GRID
+    console.print(Panel(
+        Columns([score_panel, ext_panel]),
+        title=f"Dashboard: {file.name}",
+        subtitle="Run 'codedoc fix' to resolve issues automatically"
+    ))
+    console.print(Columns([c_table, issues_panel]))
+
+    # Print External Details if failures
+    if ruff_res["status"] == "issue":
+        console.print(Panel(ruff_res["output"], title="Ruff Details", border_style="red", expand=False))
     
 @app.command("status")
 def status():

@@ -28,7 +28,7 @@ def get_pid():
             return None
     return None
 
-def start_server(model_path: Path, host=DEFAULT_HOST, port=DEFAULT_PORT, n_gpu=-1, ctx=16384):
+def start_server(model_path: Path, host=DEFAULT_HOST, port=DEFAULT_PORT, n_gpu=-1, ctx=32768):
     """Start the llama.cpp server as a detached subprocess."""
     
     if is_server_running(host, port):

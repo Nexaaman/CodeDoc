@@ -6,14 +6,15 @@ from rich.panel import Panel
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.syntax import Syntax
+from rich.prompt import Prompt
 import time
 from huggingface_hub import hf_hub_download
-
+from codedoc.agent import WorkflowAgent
 from codedoc.config import (
-    ensure_dirs, MODELS_DIR, DEFAULT_REPO, DEFAULT_FILENAME, 
-    DEFAULT_HOST, DEFAULT_PORT
+    ensure_dirs, MODELS_DIR, DEFAULT_MODEL_KEY, 
+    DEFAULT_HOST, DEFAULT_PORT, MODELS
 )
-from codedoc.server import start_server, stop_server, is_server_running
+from codedoc.server import start_server, stop_server, is_server_running, get_pid
 from codedoc.agent import LocalCodeAgent
 from codedoc.analysis import Issue
 from codedoc.patch import create_diff, apply_fix
@@ -33,62 +34,68 @@ def main():
 
 # --- Model Commands ---
 
+
+@model_app.command("list")
+def list_models():
+    """List supported models and downloads."""
+    table = Table(title="Supported Models", border_style="blue")
+    table.add_column("Key", style="cyan", width=12)
+    table.add_column("Name", style="white")
+    table.add_column("Status", justify="center")
+
+    for key, info in MODELS.items():
+        path = MODELS_DIR / info["filename"]
+        status = "[green]Downloaded[/green]" if path.exists() else "[dim]Not Found[/dim]"
+        table.add_row(key, info["name"], status)
+    
+    console.print(table)
+    console.print("\nUsage: [bold]codedoc model download <key>[/bold]")
+
 @model_app.command("download")
 def download_model(
-    repo: str = typer.Option(DEFAULT_REPO, help="Hugging Face Repo ID"),
-    filename: str = typer.Option(DEFAULT_FILENAME, help="GGUF Filename")
+    key: str = typer.Argument(DEFAULT_MODEL_KEY, help="Model key (e.g. qwen-7b, deepseek-6b)"),
 ):
-    """Download a GGUF model for local inference."""
-    console.print(Panel(f"Downloading from [bold cyan]{repo}[/bold cyan]", title="Model Manager"))
+    """Download a model by key."""
+    if key not in MODELS:
+        console.print(f"[red]Unknown model key: {key}[/red]")
+        console.print("Run 'codedoc model list' to see available models.")
+        raise typer.Exit(1)
+        
+    info = MODELS[key]
+    console.print(Panel(f"Downloading [bold cyan]{info['name']}[/bold cyan]", title="Model Manager"))
     
     try:
         path = hf_hub_download(
-            repo_id=repo,
-            filename=filename,
+            repo_id=info["repo"],
+            filename=info["filename"],
             local_dir=MODELS_DIR,
         )
         console.print(f"[bold green]✔ Download Complete![/bold green]")
         console.print(f"Location: {path}")
     except Exception as e:
         console.print(f"[bold red]Download failed:[/bold red] {e}")
-
-@model_app.command("list")
-def list_models():
-    """List available models."""
-    files = list(MODELS_DIR.glob("*.gguf"))
-    if not files:
-        console.print("[yellow]No models found. Run 'codedoc model download' first.[/yellow]")
-        return
-    
-    console.print(f"[bold]Found {len(files)} models:[/bold]")
-    for f in files:
-        size_gb = f.stat().st_size / (1024**3)
-        console.print(f"• [cyan]{f.name}[/cyan] ({size_gb:.2f} GB)")
-
+        
 # --- Server Commands ---
 
 @app.command("serve")
 def serve(
     model: Optional[str] = typer.Option(None, help="Name of GGUF file"),
     gpu_layers: int = typer.Option(-1, help="GPU layers to offload (-1 for all)"),
-    ctx: int = typer.Option(16384, help="Context window size")
+    ctx: int = typer.Option(32768, help="Context window size")
 ):
     """Start the local Inference Server."""
-    # Find model
-    if not model:
-        # auto-select first model if not specified
-        files = list(MODELS_DIR.glob("*.gguf"))
-        if not files:
-            console.print("[red]No models found. Download one first![/red]")
-            raise typer.Exit(1)
-        model_path = files[0]
-        console.print(f"[yellow]No model specified. Using: {model_path.name}[/yellow]")
+    if model in MODELS:
+        filename = MODELS[model]["filename"]
+        model_path = MODELS_DIR / filename
     else:
-        model_path = MODELS_DIR / model
-        if not model_path.exists():
-            console.print(f"[red]Model {model} not found in {MODELS_DIR}[/red]")
-            raise typer.Exit(1)
+        model_path = MODELS_DIR / model # Try direct filename
 
+    if not model_path.exists():
+        console.print(f"[red]Model not found: {model_path}[/red]")
+        console.print("[yellow]Run 'codedoc model list' to check availability.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Starting server with {model_path.name}...[/bold]")
     success = start_server(model_path, n_gpu=gpu_layers, ctx=ctx)
     if not success:
         raise typer.Exit(1)
@@ -217,6 +224,137 @@ def fix(
     else:
         console.print(f"[bold red]❌ Failed to write to {file.name}[/bold red]")
         raise typer.Exit(1)
+    
+    
+@app.command("task")
+def task(
+    prompt: str = typer.Argument(..., help="Describe what you want the agent to do"),
+):
+    """
+    Run a multi-step agent workflow (Plan -> Analyze -> Fix).
+    Example: codedoc task "Add a new 'delete' command to cli.py and update utils"
+    """
+    if not is_server_running():
+        console.print("[red]Server is not running. Execute 'codedoc serve' first.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold blue]🤖 Received Task:[/bold blue] {prompt}")
+    
+    agent = WorkflowAgent()
+    agent.run_workflow(prompt)
+    
+@app.command("chat")
+def chat():
+    """
+    Start an interactive chat session with the CodeDoc Orchestrator.
+    """
+    if not is_server_running():
+        console.print("[red]Server is not running. Execute 'codedoc serve' first.[/red]")
+        raise typer.Exit(1)
+
+    from codedoc.agent import ChatOrchestrator
+    
+    console.print(Panel(
+        "[bold green]CodeDoc Interactive Orchestrator[/bold green]\n"
+        "Type 'exit', 'quit', or 'bye' to leave.\n"
+        "commands: 'analyze <file>', 'fix <file>', or natural language.", 
+        border_style="green"
+    ))
+
+    orchestrator = ChatOrchestrator()
+    
+    while True:
+        try:
+            # Get user input
+            user_input = Prompt.ask("\n[bold cyan]You[/bold cyan]")
+            
+            if user_input.lower() in ["exit", "quit", "bye"]:
+                console.print("[yellow]Goodbye![/yellow]")
+                break
+                
+            if not user_input.strip():
+                continue
+
+            # Show thinking spinner
+            with console.status("[bold magenta]CodeDoc is thinking...[/bold magenta]", spinner="dots"):
+                response = orchestrator.chat_turn(user_input)
+
+            # Print Agent Response
+            console.print(Panel(Markdown(response), title="CodeDoc", border_style="blue"))
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Goodbye![/yellow]")
+            break
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+    
+@app.command("status")
+def status():
+    """Check the health and status of the CodeDoc server."""
+    from codedoc.config import DEFAULT_HOST, DEFAULT_PORT, MODELS_DIR, SERVER_PID_FILE
+    import psutil
+    from rich.table import Table
+    
+    console.print(Panel("CodeDoc System Status", style="bold cyan"))
+    
+    # 1. Check Server Status
+    if is_server_running(DEFAULT_HOST, DEFAULT_PORT):
+        server_status = "[bold green]✓ ONLINE[/bold green]"
+        server_url = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1"
+    else:
+        server_status = "[bold red]✗ OFFLINE[/bold red]"
+        server_url = "[dim]N/A[/dim]"
+    
+    # 2. Check PID
+    pid = get_pid()
+    if pid:
+        try:
+            process = psutil.Process(pid)
+            cpu_percent = process.cpu_percent(interval=0.1)
+            memory_mb = process.memory_info().rss / (1024 * 1024)
+            pid_info = f"[cyan]{pid}[/cyan] (CPU: {cpu_percent:.1f}%, RAM: {memory_mb:.0f}MB)"
+        except psutil.NoSuchProcess:
+            pid_info = f"[red]{pid} (dead)[/red]"
+    else:
+        pid_info = "[dim]No PID file[/dim]"
+    
+    # 3. Check Models
+    model_files = list(MODELS_DIR.glob("*.gguf"))
+    if model_files:
+        model_info = f"[green]{len(model_files)} model(s)[/green]"
+        model_list = "\n".join([f"  • {f.name}" for f in model_files[:3]])
+        if len(model_files) > 3:
+            model_list += f"\n  ... and {len(model_files) - 3} more"
+    else:
+        model_info = "[yellow]No models found[/yellow]"
+        model_list = "  [dim]Run 'codedoc model download' first[/dim]"
+    
+    # 4. Create Status Table
+    table = Table(show_header=False, border_style="blue", padding=(0, 2))
+    table.add_column("Component", style="bold white", width=20)
+    table.add_column("Status", style="white")
+    
+    table.add_row("Server", server_status)
+    table.add_row("Endpoint", server_url)
+    table.add_row("Process", pid_info)
+    table.add_row("Models", model_info)
+    
+    console.print(table)
+    console.print()
+    
+    # 5. Show Model Details
+    console.print("[bold]Available Models:[/bold]")
+    console.print(model_list)
+    
+    # 6. Quick Actions
+    console.print()
+    if not is_server_running():
+        console.print("[yellow]💡 Tip: Start the server with 'codedoc serve'[/yellow]")
+    elif not model_files:
+        console.print("[yellow]💡 Tip: Download a model with 'codedoc model download'[/yellow]")
+    else:
+        console.print("[green]✓ System ready! Try 'codedoc analyze <file>' or 'codedoc fix <file>' or 'codedoc task <prompt>' or 'codedoc chat' [/green]")
+
 
 if __name__ == "__main__":
     app()
